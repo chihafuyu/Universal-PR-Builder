@@ -135,11 +135,15 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          COMMIT_HASH="$(git rev-parse --short=12 HEAD)"
+          COMMIT_HASH="$(git log -1 --format='%h')"
           printf 'hash=%s\n' "$COMMIT_HASH" >> "$GITHUB_OUTPUT"
 
+          REPO_URL="https://github.com/${REPO}"
+          COMMIT_URL="${REPO_URL}/commit/${COMMIT_HASH}"
+
           CHANGELOG="changelog-${SAFE_REPO}-${PR}.txt"
-          printf '%s\n' "- PR #${PR} (Commit: \\`${COMMIT_HASH}\\`, Repo: ${REPO})" > "$CHANGELOG"
+          
+          printf '%s\n' "- PR #${PR} (Commit: [\`${COMMIT_HASH}\`](${COMMIT_URL}), Repo: [${REPO}](${REPO_URL}))" > "$CHANGELOG"
 
       - name: Build with Gradle
         env:
