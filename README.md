@@ -21,12 +21,12 @@ The workflow is triggered manually (`workflow_dispatch`) via the **Actions** tab
 
    **Single Execution Example:**
    ```text
-   crimera/piko#1567
+   MorpheApp/morphe-patches#2814
    ```
    
    **Parallel Execution Example (comma-separated):**
    ```text
-   crimera/piko#1567, MorpheApp/morphe-patches#10
+   crimera/piko#1567, crimera/piko#1809
    ```
    
 4. Click **Run**. Once completed, the system will publish the artifacts in the **Releases** tab of this repository, marked as a _Pre-release_.
