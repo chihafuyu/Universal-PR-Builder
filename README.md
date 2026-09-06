@@ -1,0 +1,42 @@
+# Universal PR Builder
+
+This repository serves as a centralized Continuous Integration (CI) assembly line. Its primary function is to fetch, build, and publish compiled artifacts from various cross-repository Pull Requests into a single, organized GitHub Release.
+
+## Key Features
+
+- **Multi-Target Parallel Build:** Supports compiling multiple PRs from different repositories simultaneously in a single workflow run.
+- **Hardened Security:** Designed with *Zero-Trust* principles. The executed PR code has no access to secrets, tokens, or persistent caches, mitigating the risk of supply-chain attacks.
+- **Auto-Changelog Assembly:** Automatically generates release changelogs based on the exact Commit ID (hash) of each built PR.
+- **Isolated Assets:** Build outputs (`.mpp`) are securely isolated and uniquely named to prevent file name collisions.
+
+## How to Use
+
+The workflow is triggered manually (`workflow_dispatch`) via the **Actions** tab.
+
+1. Navigate to the **Actions** tab and select the **Build PRs (Multi-Repo)** workflow.
+2. Click the **Run workflow** button.
+3. In the *Targets* input field, provide the list of repositories and the corresponding PR numbers you wish to build.
+   
+   **Required Format:** `owner/repo#PR_NUMBER`
+
+   **Single Execution Example:**
+   ```text
+   crimera/piko#1567
+   ```
+   
+   **Parallel Execution Example (comma-separated):**
+   ```text
+   crimera/piko#1567, MorpheApp/morphe-patches#10
+   ```
+   
+4. Click **Run**. Once completed, the system will publish the artifacts in the **Releases** tab of this repository, marked as a _Pre-release_.
+
+## Automated Maintenance
+
+This repository is powered by Dependabot to keep dependencies up-to-date automatically:
+
+- **GitHub Actions:** Every Monday at 03:00 (Asia/Jakarta)
+- **NPM:** Every Monday at 04:00 (Asia/Jakarta)
+- **Gradle:** Every Monday at 05:00 (Asia/Jakarta)
+
+Updates are grouped into a single Pull Request per ecosystem to keep the commit history clean.
