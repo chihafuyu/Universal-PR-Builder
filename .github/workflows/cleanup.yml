@@ -1,0 +1,37 @@
+name: Auto Cleanup
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sweep:
+    name: Sweep All Data
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Delete All Releases and Tags
+        run: |
+          set -Eeuo pipefail
+          
+          echo "Fetching all releases..."
+          gh release list --json tagName -q ".[].tagName" | while read -r TAG; do
+            echo "Deleting release and tag: $TAG"
+            gh release delete "$TAG" -y --cleanup-tag
+          done
+
+      - name: Delete All Workflow Runs
+        run: |
+          set -Eeuo pipefail
+          
+          echo "Fetching all workflow runs..."
+          gh api repos/${{ github.repository }}/actions/runs --paginate -q ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id" | while read -r RUN_ID; do
+            echo "Deleting run ID: $RUN_ID"
+            gh api -X DELETE repos/${{ github.repository }}/actions/runs/"$RUN_ID" || true
+          done
