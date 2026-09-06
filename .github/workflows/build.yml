@@ -95,7 +95,7 @@ jobs:
           printf 'pr=%s\n' "$PR" >> "$GITHUB_OUTPUT"
 
       - name: Checkout PR ${{ matrix.target.pr }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ matrix.target.repo }}
           ref: refs/pull/${{ matrix.target.pr }}/head
@@ -103,7 +103,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: 'zulu'
           java-version: '21'
@@ -111,7 +111,7 @@ jobs:
       # Intentionally no persistent Gradle cache here: the checked-out repository is untrusted.
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
 
@@ -176,7 +176,7 @@ jobs:
           mv -- "changelog-${SAFE_REPO}-${PR}.txt" output/
 
       - name: Upload Temporary Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pr-data-${{ steps.ids.outputs.safe_repo }}-${{ matrix.target.pr }}
           path: output/*
@@ -190,7 +190,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all PR data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: pr-data-*
           path: downloads
