@@ -9,7 +9,6 @@ on:
         type: string
         default: 'crimera/piko#1567'
 
-# Default deny. Jobs below explicitly elevate only what they need.
 permissions:
   contents: read
 
@@ -72,6 +71,7 @@ jobs:
     needs: setup
     permissions:
       contents: read
+      packages: read
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -88,7 +88,6 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # Validation happened in setup. Use an unambiguous separator for filenames.
           SAFE_REPO="${REPO//\//__}"
           printf 'safe_repo=%s\n' "$SAFE_REPO" >> "$GITHUB_OUTPUT"
           printf 'repo=%s\n' "$REPO" >> "$GITHUB_OUTPUT"
@@ -107,8 +106,6 @@ jobs:
         with:
           distribution: 'zulu'
           java-version: '21'
-
-      # Intentionally no persistent Gradle cache here: the checked-out repository is untrusted.
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -145,6 +142,8 @@ jobs:
           printf '%s\n' "- PR #${PR} (Commit: \\`${COMMIT_HASH}\\`, Repo: ${REPO})" > "$CHANGELOG"
 
       - name: Build with Gradle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -Eeuo pipefail
