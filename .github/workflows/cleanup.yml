@@ -2,8 +2,14 @@ name: Auto Cleanup
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 17 * * *'
   workflow_dispatch:
+    inputs:
+      confirm_delete:
+        description: 'Confirm deleting ALL releases, tags, and workflow logs (type "yes" to proceed)'
+        required: true
+        default: 'yes'
+        type: string
 
 permissions:
   contents: write
@@ -11,27 +17,29 @@ permissions:
 
 jobs:
   sweep:
+    if: github.event_name == 'schedule' || github.event.inputs.confirm_delete == 'yes'
     name: Sweep All Data
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO_TARGET: ${{ github.repository }}
     steps:
       - name: Delete All Releases and Tags
         run: |
           set -Eeuo pipefail
           
-          echo "Fetching all releases..."
-          gh release list --json tagName -q ".[].tagName" | while read -r TAG; do
+          echo "Fetching all releases from $REPO_TARGET..."
+          gh release list --repo "$REPO_TARGET" --json tagName -q ".[].tagName" | while read -r TAG; do
             echo "Deleting release and tag: $TAG"
-            gh release delete "$TAG" -y --cleanup-tag
+            gh release delete "$TAG" --repo "$REPO_TARGET" -y --cleanup-tag
           done
 
       - name: Delete All Workflow Runs
         run: |
           set -Eeuo pipefail
           
-          echo "Fetching all workflow runs..."
-          gh api repos/${{ github.repository }}/actions/runs --paginate -q ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id" | while read -r RUN_ID; do
+          echo "Fetching all workflow runs from $REPO_TARGET..."
+          gh api repos/"$REPO_TARGET"/actions/runs --paginate -q ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id" | while read -r RUN_ID; do
             echo "Deleting run ID: $RUN_ID"
-            gh api -X DELETE repos/${{ github.repository }}/actions/runs/"$RUN_ID" || true
+            gh api -X DELETE repos/"$REPO_TARGET"/actions/runs/"$RUN_ID" || true
           done
