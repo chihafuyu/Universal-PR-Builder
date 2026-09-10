@@ -103,10 +103,11 @@ jobs:
 
           REPO_URL="https://github.com/${REPO}"
           COMMIT_URL="${REPO_URL}/commit/${COMMIT_HASH}"
+          PR_URL="${REPO_URL}/pull/${PR}"
 
           CHANGELOG="changelog-${SAFE_REPO}-${PR}.txt"
           
-          printf '%s\n' "- PR #${PR} (Commit: [\`${COMMIT_HASH}\`](${COMMIT_URL}), Repo: [${REPO}](${REPO_URL}))" > "$CHANGELOG"
+          printf '%s\n' "- PR [#${PR}](${PR_URL}) (Commit: [\`${COMMIT_HASH}\`](${COMMIT_URL}), Repo: [${REPO}](${REPO_URL}))" > "$CHANGELOG"
 
       - name: Build with Gradle
         env:
