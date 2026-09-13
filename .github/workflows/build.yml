@@ -115,7 +115,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          ./gradlew :patches:buildAndroid clean --no-daemon
+          ./gradlew clean :patches:buildAndroid --no-daemon
 
       - name: Prepare Assets
         env:
