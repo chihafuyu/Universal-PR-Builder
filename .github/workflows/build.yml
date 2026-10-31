@@ -4,10 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       pr_list:
-        description: 'Targets (Format: owner/repo#PR, e.g., crimera/piko#1567, crimera/piko#1809)'
-        required: true
+        description: 'Gradle targets (owner/repo#PR, comma-separated). Leave empty to skip.'
+        required: false
+        default: ''
         type: string
-        default: 'crimera/piko#1567'
+      fennec_version:
+        description: 'Fennec version: versionCode (e.g. 1590000) or versionName (e.g. 159.0.0). Leave empty to skip.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -16,15 +21,17 @@ jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
-      targets: ${{ steps.parse.outputs.targets }}
+      gradle_targets: ${{ steps.parse.outputs.gradle_targets }}
+      fennec_version: ${{ steps.parse.outputs.fennec_version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Parse and validate PR list
+      - name: Parse and validate inputs
         id: parse
         env:
           PR_LIST: ${{ inputs.pr_list }}
+          FENNEC_VERSION: ${{ inputs.fennec_version }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -32,6 +39,7 @@ jobs:
 
   build:
     needs: setup
+    if: needs.setup.outputs.gradle_targets != '[]'
     permissions:
       contents: read
       packages: read
@@ -39,7 +47,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        target: ${{ fromJson(needs.setup.outputs.targets) }}
+        target: ${{ fromJson(needs.setup.outputs.gradle_targets) }}
     runs-on: ubuntu-latest
     steps:
       - name: Compute safe identifiers
@@ -50,11 +58,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           SAFE_REPO="${REPO//\//__}"
           printf 'safe_repo=%s\n' "$SAFE_REPO" >> "$GITHUB_OUTPUT"
-          printf 'repo=%s\n' "$REPO" >> "$GITHUB_OUTPUT"
-          printf 'pr=%s\n' "$PR" >> "$GITHUB_OUTPUT"
 
       - name: Checkout PR ${{ matrix.target.pr }}
         uses: actions/checkout@v7
@@ -79,7 +84,6 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
             npm ci --ignore-scripts --no-audit --no-fund
           elif [[ -f package.json ]]; then
@@ -97,16 +101,14 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           COMMIT_HASH="$(git log -1 --format='%h')"
           printf 'hash=%s\n' "$COMMIT_HASH" >> "$GITHUB_OUTPUT"
 
           REPO_URL="https://github.com/${REPO}"
           COMMIT_URL="${REPO_URL}/commit/${COMMIT_HASH}"
           PR_URL="${REPO_URL}/pull/${PR}"
-
           CHANGELOG="changelog-${SAFE_REPO}-${PR}.txt"
-          
+
           printf '%s\n' "- PR [#${PR}](${PR_URL}) (Commit: [\`${COMMIT_HASH}\`](${COMMIT_URL}), Repo: [${REPO}](${REPO_URL}))" > "$CHANGELOG"
 
       - name: Build with Gradle
@@ -125,7 +127,6 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           mkdir -p output
 
           shopt -s nullglob
@@ -139,7 +140,6 @@ jobs:
 
           dest="output/patches-${SAFE_REPO}-pr-${PR}-${HASH}.mpp"
           mv -- "${artifacts[0]}" "$dest"
-
           mv -- "changelog-${SAFE_REPO}-${PR}.txt" output/
 
       - name: Upload Temporary Artifact
@@ -150,8 +150,188 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-fennec:
+    needs: setup
+    if: needs.setup.outputs.fennec_version != ''
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Install fdroidserver
+        run: pip install fdroidserver
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Clone fdroiddata
+        run: git clone --depth 1 https://gitlab.com/fdroid/fdroiddata.git
+
+      - name: Resolve version and prepare config
+        id: resolve
+        working-directory: fdroiddata
+        env:
+          FENNEC_VERSION: ${{ needs.setup.outputs.fennec_version }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import os, sys, yaml
+          version = os.environ["FENNEC_VERSION"]
+
+          with open("metadata/org.mozilla.fennec_fdroid.yml") as f:
+              meta = yaml.safe_load(f)
+
+          builds = meta.get("Builds", [])
+          if not builds:
+              sys.exit("ERROR: no Builds entries in fennec metadata")
+
+          vercode = None
+          ver_name = None
+          if version.isdigit():
+              for b in builds:
+                  if str(b.get("versionCode")) == version:
+                      vercode, ver_name = version, b.get("versionName", "")
+                      break
+          else:
+              for b in builds:
+                  if b.get("versionName") == version:
+                      vercode, ver_name = str(b.get("versionCode")), version
+                      break
+
+          if not vercode:
+              lines = "\n".join(
+                  f"  versionCode={b.get('versionCode')} versionName={b.get('versionName')}"
+                  for b in builds[-10:]
+              )
+              sys.exit(f"ERROR: version '{version}' not found in metadata. Recent builds:\n{lines}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"vercode={vercode}\n")
+              out.write(f"version_name={ver_name}\n")
+
+          build_tools = builds[-1].get("build_tools") or "35.0.0"
+          with open("config.py", "w") as f:
+              f.write(f"sdk_path = '{os.environ['ANDROID_HOME']}'\n")
+              f.write(f"build_tools = '{build_tools}'\n")
+
+          print(f"vercode={vercode} version_name={ver_name} build_tools={build_tools}")
+          PY
+
+      - name: Install build-tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BT="$(python3 -c "exec(open('fdroiddata/config.py').read()); print(build_tools)")"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "build-tools;${BT}"
+
+      - name: Build Fennec
+        id: build
+        working-directory: fdroiddata
+        env:
+          FENNEC_VERCODE: ${{ steps.resolve.outputs.vercode }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          fdroid build "org.mozilla.fennec_fdroid:${FENNEC_VERCODE}"
+          HASH="$(git log -1 --format='%h')"
+          printf 'fdroiddata_hash=%s\n' "$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Sign APK
+        env:
+          KEYSTORE_B64: ${{ secrets.FENNEC_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.FENNEC_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.FENNEC_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.FENNEC_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          shopt -s nullglob
+          apks=(fdroiddata/unsigned/*.apk fdroiddata/repo/*.apk)
+          if (( ${#apks[@]} == 0 )); then
+            echo "ERROR: no APK produced by fdroid build" >&2
+            exit 1
+          fi
+
+          mkdir -p signed
+
+          if [[ -n "${KEYSTORE_B64:-}" ]]; then
+            echo "$KEYSTORE_B64" | base64 -d > signing.keystore
+            if [[ -z "${KEYSTORE_PASS:-}" || -z "${KEY_ALIAS:-}" || -z "${KEY_PASS:-}" ]]; then
+              echo "ERROR: keystore provided but password/alias/pass secrets missing" >&2
+              exit 1
+            fi
+          else
+            echo "::warning::No FENNEC_KEYSTORE_BASE64 secret set. Generating ephemeral self-signed key."
+            echo "::warning::APK will install on fresh device but will NOT update over official F-Droid Fennec."
+            KEY_ALIAS="fennec-ephemeral"
+            KEYSTORE_PASS="$(openssl rand -hex 16)"
+            KEY_PASS="$KEYSTORE_PASS"
+            keytool -genkeypair -v -keystore signing.keystore -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" \
+              -dname "CN=Fennec Local Build, O=Local, C=XX" 2>/dev/null
+          fi
+
+          for apk in "${apks[@]}"; do
+            out="signed/$(basename "$apk")"
+            apksigner sign \
+              --ks signing.keystore \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass "pass:$KEYSTORE_PASS" \
+              --key-pass "pass:$KEY_PASS" \
+              --out "$out" \
+              "$apk"
+            apksigner verify --verbose "$out" || true
+          done
+
+          rm -f signing.keystore
+          ls -la signed/
+
+      - name: Create changelog marker
+        env:
+          VERCODE: ${{ steps.resolve.outputs.vercode }}
+          VERSION_NAME: ${{ steps.resolve.outputs.version_name }}
+          FDROIDDATA_HASH: ${{ steps.build.outputs.fdroiddata_hash }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p output
+          {
+            printf -- '- Fennec %s (versionCode `%s`) - APK uploaded as workflow artifact, not GitHub Release\n' \
+              "$VERSION_NAME" "$VERCODE"
+            printf '  - fdroiddata commit: [`%s`](https://gitlab.com/fdroid/fdroiddata/-/commit/%s)\n' \
+              "$FDROIDDATA_HASH" "$FDROIDDATA_HASH"
+          } > output/changelog-fennec.txt
+
+      - name: Upload Fennec APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fennec-apk-${{ steps.resolve.outputs.version_name }}
+          path: signed/*.apk
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload Fennec marker artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fennec-marker
+          path: output/*.txt
+          if-no-files-found: error
+          retention-days: 1
+
   release:
-    needs: [setup, build]
+    needs: [setup, build, build-fennec]
+    if: |
+      always() && !cancelled()
+      && !contains(needs.*.result, 'failure')
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -159,7 +339,7 @@ jobs:
       - name: Download all PR data
         uses: actions/download-artifact@v8
         with:
-          pattern: pr-data-*
+          pattern: '*-*'
           path: downloads
           merge-multiple: true
 
@@ -167,12 +347,10 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           printf '%s\n' 'Builds summary:' > release-changelog.txt
 
           shopt -s nullglob
           changelogs=(downloads/changelog-*.txt)
-
           if (( ${#changelogs[@]} == 0 )); then
             echo 'ERROR: no changelog artifacts found' >&2
             exit 1
@@ -189,6 +367,6 @@ jobs:
           name: 'Multi-Repo PR Builds'
           body_path: release-changelog.txt
           files: downloads/*.mpp
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           prerelease: true
           make_latest: false
