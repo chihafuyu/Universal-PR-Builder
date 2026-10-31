@@ -184,6 +184,20 @@ jobs:
           
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 300
+
+      - name: Cache Gradle
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
       - name: Clone fdroiddata
         run: git clone --depth 1 https://gitlab.com/fdroid/fdroiddata.git
@@ -232,9 +246,11 @@ jobs:
               out.write(f"version_name={ver_name}\n")
 
           build_tools = builds[-1].get("build_tools") or "35.0.0"
-          with open("config.py", "w") as f:
-              f.write(f"sdk_path = '{os.environ['ANDROID_HOME']}'\n")
-              f.write(f"build_tools = '{build_tools}'\n")
+          
+          with open("config.yml", "w") as f:
+              f.write(f"sdk_path: {os.environ['ANDROID_HOME']}\n")
+              f.write(f"build_tools: '{build_tools}'\n")
+              f.write("serverwebroot: ''\n") 
 
           print(f"vercode={vercode} version_name={ver_name} build_tools={build_tools}")
           PY
@@ -243,7 +259,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          BT="$(python3 -c "exec(open('fdroiddata/config.py').read()); print(build_tools)")"
+          BT="$(python3 -c "import yaml; print(yaml.safe_load(open('fdroiddata/config.yml'))['build_tools'])")"
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "build-tools;${BT}"
 
@@ -252,6 +268,7 @@ jobs:
         working-directory: fdroiddata
         env:
           FENNEC_VERCODE: ${{ steps.resolve.outputs.vercode }}
+          GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.jvmargs=-Xmx4g -XX:+UseParallelGC"
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -279,14 +296,16 @@ jobs:
           mkdir -p signed
 
           if [[ -n "${KEYSTORE_B64:-}" ]]; then
+            echo "Decoding provided custom keystore..."
             echo "$KEYSTORE_B64" | base64 -d > signing.keystore
+            
             if [[ -z "${KEYSTORE_PASS:-}" || -z "${KEY_ALIAS:-}" || -z "${KEY_PASS:-}" ]]; then
               echo "ERROR: keystore provided but password/alias/pass secrets missing" >&2
               exit 1
             fi
           else
             echo "::warning::No FENNEC_KEYSTORE_BASE64 secret set. Generating ephemeral self-signed key."
-            echo "::warning::APK will install on fresh device but will NOT update over official F-Droid Fennec."
+            echo "::warning::APK will install on a fresh device but will NOT update over the official F-Droid Fennec."
             KEY_ALIAS="fennec-ephemeral"
             KEYSTORE_PASS="$(openssl rand -hex 16)"
             KEY_PASS="$KEYSTORE_PASS"
@@ -309,7 +328,6 @@ jobs:
           done
 
           rm -f signing.keystore
-          ls -la signed/
 
       - name: Create changelog marker
         env:
