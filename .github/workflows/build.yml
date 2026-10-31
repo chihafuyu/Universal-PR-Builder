@@ -158,6 +158,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
+      - name: Setup Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
       - name: Setup Python
         uses: actions/setup-python@v7.1.0
         with:
@@ -168,6 +174,16 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+
+      - name: Install Build Dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y openjdk-17-jdk-headless cmake make m4 pkg-config python-is-python3 python3-venv python3-zstandard tcl gyp ninja-build bzip2 libffi-dev libsqlite3-dev binutils-dev clang lld llvm libssl-dev libxml2-dev zlib1g-dev nodejs terser
+          
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Clone fdroiddata
         run: git clone --depth 1 https://gitlab.com/fdroid/fdroiddata.git
@@ -239,7 +255,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          fdroid build "org.mozilla.fennec_fdroid:${FENNEC_VERCODE}"
+          fdroid build --verbose "org.mozilla.fennec_fdroid:${FENNEC_VERCODE}"
           HASH="$(git log -1 --format='%h')"
           printf 'fdroiddata_hash=%s\n' "$HASH" >> "$GITHUB_OUTPUT"
 
@@ -332,6 +348,7 @@ jobs:
     if: |
       always() && !cancelled()
       && !contains(needs.*.result, 'failure')
+      && needs.setup.outputs.gradle_targets != '[]'
     permissions:
       contents: write
     runs-on: ubuntu-latest
