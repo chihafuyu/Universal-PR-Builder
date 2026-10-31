@@ -158,7 +158,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Free up disk space and configure swap
+      - name: Free up disk space
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -174,18 +174,29 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Build Dependencies & fdroidserver
+      - name: Install Build Dependencies, LLVM Symlinks & fdroidserver
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            cmake make m4 pkg-config python-is-python3 python3-pip python3-venv \
-            python3-zstandard tcl gyp ninja-build bzip2 libffi-dev libsqlite3-dev \
-            binutils-dev clang lld llvm libssl-dev libxml2-dev zlib1g-dev \
-            nodejs terser zip unzip
+            build-essential cmake make m4 pkg-config python-is-python3 python3-pip \
+            python3-venv python3-zstandard tcl gyp ninja-build bzip2 libffi-dev \
+            libsqlite3-dev binutils-dev clang lld llvm libssl-dev libxml2-dev \
+            zlib1g-dev nodejs terser zip unzip
 
           python3 -m pip install --break-system-packages --upgrade fdroidserver PyYAML zstandard
+
+          LLVM_PREFIX="$(llvm-config --prefix)"
+          for ver in 13 14 15 16 17 18 19 20 21 22; do
+            if [[ ! -e "/usr/lib/llvm-${ver}" ]]; then
+              sudo ln -sfn "$LLVM_PREFIX" "/usr/lib/llvm-${ver}"
+            fi
+          done
+
+          sudo mkdir -p /usr/lib/jvm
+          sudo ln -sfn "$JAVA_HOME" /usr/lib/jvm/java-17-openjdk-amd64
+          sudo ln -sfn "$JAVA_HOME" /usr/lib/jvm/java-1.17.0-openjdk-amd64
 
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -197,7 +208,7 @@ jobs:
           git config --global http.lowSpeedTime 300
           git config --global url."https://https.git.savannah.gnu.org/git/".insteadOf "https://git.savannah.gnu.org/git/"
 
-      - name: Install Android SDK packages & sdkmanager shim
+      - name: Install Android SDK packages & CLI shims
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -214,6 +225,31 @@ jobs:
           exec "$REAL_SDKMANAGER" "\${args[@]}"
           EOF
           sudo chmod +x /usr/local/bin/sdkmanager
+
+          REAL_GIT="$(command -v git)"
+          sudo tee /usr/local/bin/git >/dev/null <<EOF
+          #!/usr/bin/env bash
+          has_clone=0
+          has_filter=0
+          for arg in "\$@"; do
+            [[ "\$arg" == "clone" ]] && has_clone=1
+            [[ "\$arg" == --filter=* || "\$arg" == --depth* ]] && has_filter=1
+          done
+          if (( has_clone == 1 && has_filter == 0 )); then
+            new_args=()
+            inserted=0
+            for arg in "\$@"; do
+              new_args+=("\$arg")
+              if [[ "\$arg" == "clone" && \$inserted -eq 0 ]]; then
+                new_args+=("--filter=blob:none")
+                inserted=1
+              fi
+            done
+            exec "$REAL_GIT" "\${new_args[@]}"
+          fi
+          exec "$REAL_GIT" "\$@"
+          EOF
+          sudo chmod +x /usr/local/bin/git
           echo "/usr/local/bin" >> "$GITHUB_PATH"
 
       - name: Cache Gradle
@@ -237,6 +273,91 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+
+          cat <<'EOF' > /tmp/fix_fennec_build.py
+          import glob
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+
+          llvm_prefix = subprocess.check_output(["llvm-config", "--prefix"], text=True).strip()
+          llvm_bindir = subprocess.check_output(["llvm-config", "--bindir"], text=True).strip()
+          print(f"[fix_fennec_build] Active LLVM prefix={llvm_prefix} bindir={llvm_bindir}")
+
+          for root_dir in (".", "../srclib"):
+              if not os.path.exists(root_dir):
+                  continue
+              for dirpath, _, filenames in os.walk(root_dir):
+                  if ".git" in dirpath.split(os.sep):
+                      continue
+                  for fn in filenames:
+                      if fn.endswith((".sh", ".py", ".json", ".patch", ".mozconfig")) or "mozconfig" in fn:
+                          fpath = os.path.join(dirpath, fn)
+                          try:
+                              with open(fpath, "r", encoding="utf-8") as f:
+                                  text = f.read()
+                          except (OSError, UnicodeDecodeError):
+                              continue
+                          new_text = re.sub(r"platform-tools;[0-9.]+", "platform-tools", text)
+                          new_text = re.sub(r"/usr/lib/llvm-[0-9]+", llvm_prefix, new_text)
+                          if new_text != text:
+                              with open(fpath, "w", encoding="utf-8") as f:
+                                  f.write(new_text)
+                              print(f"[fix_fennec_build] Patched paths in {fpath}")
+
+          tool_map = {
+              "cc": os.path.join(llvm_bindir, "clang"),
+              "cxx": os.path.join(llvm_bindir, "clang++"),
+              "as": os.path.join(llvm_bindir, "clang"),
+              "ld": os.path.join(llvm_bindir, "ld.lld"),
+              "ar": os.path.join(llvm_bindir, "llvm-ar"),
+              "ranlib": os.path.join(llvm_bindir, "llvm-ranlib"),
+              "nm": os.path.join(llvm_bindir, "llvm-nm"),
+              "strip": os.path.join(llvm_bindir, "llvm-strip"),
+              "objcopy": os.path.join(llvm_bindir, "llvm-objcopy"),
+          }
+
+          for jpath in glob.glob("../srclib/MozFennec/build/build-clang/*.json") + glob.glob("*.json"):
+              try:
+                  with open(jpath, "r", encoding="utf-8") as f:
+                      data = json.load(f)
+              except (OSError, ValueError):
+                  continue
+              if not isinstance(data, dict):
+                  continue
+              modified = False
+              for k, fallback in tool_map.items():
+                  if k in data and not shutil.which(str(data[k])):
+                      data[k] = fallback
+                      modified = True
+              if "gcc_dir" in data and not os.path.exists(str(data["gcc_dir"])):
+                  del data["gcc_dir"]
+                  modified = True
+              if modified:
+                  with open(jpath, "w", encoding="utf-8") as f:
+                      json.dump(data, f, indent=2)
+                  print(f"[fix_fennec_build] Updated compiler tools in {jpath}")
+
+          bclang = "../srclib/MozFennec/build/build-clang/build-clang.py"
+          if os.path.isfile(bclang):
+              with open(bclang, "r", encoding="utf-8") as f:
+                  code = f.read()
+              old_snippet = 'raise ValueError("%s must point to an existing path" % key)'
+              new_snippet = (
+                  f'f = shutil.which({repr(tool_map)}.get(key, key)) or '
+                  f'shutil.which(os.path.basename(config[key]))\n'
+                  f'        if not f:\n'
+                  f'            {old_snippet}'
+              )
+              if old_snippet in code:
+                  code = code.replace(old_snippet, new_snippet)
+                  with open(bclang, "w", encoding="utf-8") as f:
+                      f.write(code)
+                  print(f"[fix_fennec_build] Injected tool fallback into {bclang}")
+          EOF
+
           python3 - <<'PY'
           import os
           import sys
@@ -275,11 +396,8 @@ jobs:
           ver_name = str(target_build.get("versionName", version))
 
           orig_prebuild = target_build.get("prebuild", "")
-          fix_sdk_cmd = (
-              "find . /home/runner/work -maxdepth 4 -name '*.sh' -exec "
-              "sed -i -E 's/platform-tools;[0-9.]+/platform-tools/g' {} + 2>/dev/null || true"
-          )
-          target_build["prebuild"] = f"{orig_prebuild}\n{fix_sdk_cmd}" if orig_prebuild else fix_sdk_cmd
+          fix_cmd = "python3 /tmp/fix_fennec_build.py"
+          target_build["prebuild"] = f"{orig_prebuild}\n{fix_cmd}" if orig_prebuild else fix_cmd
 
           with open(meta_path, "w", encoding="utf-8") as f:
               yaml.safe_dump(meta, f, sort_keys=False)
@@ -306,7 +424,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          fdroid build --verbose --stop --no-tarball "org.mozilla.fennec_fdroid:${FENNEC_VERCODE}"
+          fdroid build --verbose --no-tarball "org.mozilla.fennec_fdroid:${FENNEC_VERCODE}"
           HASH="$(git log -1 --format='%h')"
           printf 'fdroiddata_hash=%s\n' "$HASH" >> "$GITHUB_OUTPUT"
 
