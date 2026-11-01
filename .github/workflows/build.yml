@@ -158,12 +158,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Free up disk space
+      - name: Free up disk space and allocate 16GB swap
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/Go \
+            /opt/hostedtoolcache/node \
+            /opt/hostedtoolcache/Python \
+            /usr/local/lib/node_modules \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/share/swift \
+            /usr/lib/google-cloud-sdk || true
+
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
           df -h
+          free -h
 
       - name: Setup Java 17
         uses: actions/setup-java@v6
@@ -173,6 +192,8 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          log-accepted-android-sdk-licenses: false
 
       - name: Install Build Dependencies, LLVM Symlinks & fdroidserver
         shell: bash
@@ -180,10 +201,11 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install -y \
-            autotools-dev build-essential cmake make m4 pkg-config \
-            python-is-python3 python3-pip python3-venv python3-zstandard \
-            tcl gyp ninja-build bzip2 libffi-dev libsqlite3-dev binutils-dev \
-            clang lld llvm libssl-dev libxml2-dev zlib1g-dev nodejs terser zip unzip
+            autoconf autotools-dev build-essential cmake file make m4 nasm \
+            pkg-config python-is-python3 python3-pip python3-venv \
+            python3-zstandard rsync tcl gyp ninja-build bzip2 libffi-dev \
+            libsqlite3-dev binutils-dev clang lld llvm libssl-dev libxml2-dev \
+            yasm zlib1g-dev nodejs terser zip unzip
 
           python3 -m pip install --break-system-packages --upgrade fdroidserver PyYAML zstandard
 
@@ -210,12 +232,12 @@ jobs:
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 300
 
-      - name: Install Android SDK packages & sdkmanager shim
+      - name: Install Android SDK packages & CLI shims
         shell: bash
         run: |
           set -Eeuo pipefail
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "build-tools;37.0.0"
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "build-tools;37.0.0" >/dev/null
 
           REAL_SDKMANAGER="$(command -v sdkmanager)"
           sudo tee /usr/local/bin/sdkmanager >/dev/null <<EOF
@@ -227,6 +249,33 @@ jobs:
           exec "$REAL_SDKMANAGER" "\${args[@]}"
           EOF
           sudo chmod +x /usr/local/bin/sdkmanager
+
+          REAL_GIT="$(command -v git)"
+          sudo tee /usr/local/bin/git >/dev/null <<EOF
+          #!/usr/bin/env bash
+          has_clone=0
+          has_filter=0
+          is_fast_host=0
+          for arg in "\$@"; do
+            [[ "\$arg" == "clone" ]] && has_clone=1
+            [[ "\$arg" == --filter=* || "\$arg" == --depth* ]] && has_filter=1
+            [[ "\$arg" == *"github.com"* || "\$arg" == *"gitlab.com"* ]] && is_fast_host=1
+          done
+          if (( has_clone == 1 && has_filter == 0 && is_fast_host == 1 )); then
+            new_args=()
+            inserted=0
+            for arg in "\$@"; do
+              new_args+=("\$arg")
+              if [[ "\$arg" == "clone" && \$inserted -eq 0 ]]; then
+                new_args+=("--filter=blob:none")
+                inserted=1
+              fi
+            done
+            exec "$REAL_GIT" "\${new_args[@]}"
+          fi
+          exec "$REAL_GIT" "\$@"
+          EOF
+          sudo chmod +x /usr/local/bin/git
           echo "/usr/local/bin" >> "$GITHUB_PATH"
 
       - name: Cache Gradle
@@ -312,8 +361,11 @@ jobs:
               if "gcc_dir" in data and not os.path.exists(str(data["gcc_dir"])):
                   del data["gcc_dir"]
                   modified = True
-              if "stages" in data and isinstance(data["stages"], int) and data["stages"] > 1:
-                  data["stages"] = 1
+              if "stages" in data and int(data["stages"]) > 1:
+                  data["stages"] = "1" if isinstance(data["stages"], str) else 1
+                  modified = True
+              if "build_clang_tidy" in data and data["build_clang_tidy"]:
+                  data["build_clang_tidy"] = False
                   modified = True
               if modified:
                   with open(jpath, "w", encoding="utf-8") as f:
@@ -326,11 +378,29 @@ jobs:
                   code = f.read()
               old_snippet = 'raise ValueError("%s must point to an existing path" % key)'
               new_snippet = f"return __import__('shutil').which({repr(tool_map)}.get(key, key))"
-              if old_snippet in code:
-                  code = code.replace(old_snippet, new_snippet)
-                  with open(bclang, "w", encoding="utf-8") as f:
-                      f.write(code)
-                  print(f"[fix_fennec_build] Injected single-line tool fallback into {bclang}")
+              code = code.replace(old_snippet, new_snippet)
+              code = code.replace('"clang;lld;clang-tools-extra"', '"clang;lld"')
+              code = code.replace('projects.append("clang-tools-extra")', 'pass')
+              code = code.replace('"-v"', '"-j4"')
+              with open(bclang, "w", encoding="utf-8") as f:
+                  f.write(code)
+              print(f"[fix_fennec_build] Optimized {bclang} (disabled clang-tools-extra and -v spam)")
+
+          if os.path.isfile("build.sh"):
+              with open("build.sh", "r", encoding="utf-8") as f:
+                  bsh = f.read()
+              bsh = bsh.replace(
+                  "build-clang.py",
+                  "build-clang.py && rm -rf build/stage1/build",
+              )
+              with open("build.sh", "w", encoding="utf-8") as f:
+                  f.write(bsh)
+              print("[fix_fennec_build] Injected stage1 build cleanup into build.sh")
+
+          for git_dir in ("../srclib/llvm/.git", "../srclib/wasi-sdk/src/llvm-project/.git"):
+              if os.path.exists(git_dir):
+                  shutil.rmtree(git_dir, ignore_errors=True)
+                  print(f"[fix_fennec_build] Freed disk space by removing {git_dir}")
           EOF
 
           python3 - <<'PY'
@@ -420,11 +490,23 @@ jobs:
         env:
           FENNEC_VERCODE: ${{ steps.resolve.outputs.vercode }}
           CMAKE_BUILD_PARALLEL_LEVEL: "4"
-          GRADLE_OPTS: '-Dorg.gradle.parallel=true -Dorg.gradle.jvmargs="-Xmx4g -XX:+UseParallelGC"'
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
         shell: bash
         run: |
           set -Eeuo pipefail
-          fdroid build --verbose --no-tarball "org.mozilla.fennec_fdroid:${FENNEC_VERCODE}"
+          if ! fdroid build --verbose --no-tarball "org.mozilla.fennec_fdroid:${FENNEC_VERCODE}"; then
+            echo "::error::fdroid build failed! Printing system state and tail of build logs..."
+            df -h || true
+            free -h || true
+            dmesg -T | tail -n 40 || true
+            for logfile in logs/*.log; do
+              if [[ -f "$logfile" ]]; then
+                echo "=== TAIL OF $logfile ==="
+                tail -n 150 "$logfile" || true
+              fi
+            done
+            exit 1
+          fi
           HASH="$(git log -1 --format='%h')"
           printf 'fdroiddata_hash=%s\n' "$HASH" >> "$GITHUB_OUTPUT"
 
@@ -440,6 +522,9 @@ jobs:
 
           shopt -s nullglob
           apks=(fdroiddata/unsigned/*.apk fdroiddata/repo/*.apk fdroiddata/tmp/*.apk)
+          if (( ${#apks[@]} == 0 )); then
+            mapfile -t apks < <(find fdroiddata/build -name "*.apk" 2>/dev/null)
+          fi
           if (( ${#apks[@]} == 0 )); then
             echo "ERROR: no APK produced by fdroid build" >&2
             exit 1
