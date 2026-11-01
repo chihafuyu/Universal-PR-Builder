@@ -9,7 +9,7 @@ on:
         default: ''
         type: string
       fennec_version:
-        description: 'Fennec version: versionCode (e.g. 1590000) or versionName (e.g. 159.0.0). Leave empty to skip.'
+        description: 'Fennec version: versionCode (e.g. 1590020 for arm64-v8a) or versionName (e.g. 159.0.0). Leave empty to skip.'
         required: false
         default: ''
         type: string
@@ -258,14 +258,14 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-fennec-gradle-${{ needs.setup.outputs.fennec_version }}
+          key: ${{ runner.os }}-fennec-arm64-gradle-${{ needs.setup.outputs.fennec_version }}
           restore-keys: |
-            ${{ runner.os }}-fennec-gradle-
+            ${{ runner.os }}-fennec-arm64-gradle-
 
       - name: Clone fdroiddata
         run: git clone --depth 1 https://gitlab.com/fdroid/fdroiddata.git
 
-      - name: Resolve version and prepare config
+      - name: Resolve arm64-v8a version and prepare config
         id: resolve
         working-directory: fdroiddata
         env:
@@ -335,10 +335,17 @@ jobs:
               if "gcc_dir" in data and not os.path.exists(str(data["gcc_dir"])):
                   del data["gcc_dir"]
                   modified = True
+              if "stages" in data and int(data["stages"]) > 1:
+                  data["stages"] = "1" if isinstance(data["stages"], str) else 1
+                  modified = True
+              if "targets" in data and "ARM" in str(data["targets"]):
+                  targets = [t for t in str(data["targets"]).split(";") if t != "ARM"]
+                  data["targets"] = ";".join(targets)
+                  modified = True
               if modified:
                   with open(jpath, "w", encoding="utf-8") as f:
                       json.dump(data, f, indent=2)
-                  print(f"[fix_fennec_build] Updated compiler tools in {jpath}")
+                  print(f"[fix_fennec_build] Optimized arm64/stage-1 config in {jpath}")
 
           bclang = "../srclib/MozFennec/build/build-clang/build-clang.py"
           if os.path.isfile(bclang):
@@ -363,7 +370,7 @@ jobs:
           import sys
           import yaml
 
-          version = os.environ["FENNEC_VERSION"]
+          version = os.environ["FENNEC_VERSION"].strip()
           meta_path = "metadata/org.mozilla.fennec_fdroid.yml"
 
           with open(meta_path, "r", encoding="utf-8") as f:
@@ -373,17 +380,23 @@ jobs:
           if not builds:
               sys.exit("ERROR: no Builds entries in fennec metadata")
 
+          by_vercode = {str(b.get("versionCode")): b for b in builds}
           target_build = None
+
           if version.isdigit():
-              for b in builds:
-                  if str(b.get("versionCode")) == version:
-                      target_build = b
-                      break
+              if version.endswith("00") and (version[:-2] + "20") in by_vercode:
+                  arm64_code = version[:-2] + "20"
+                  print(f"Switching 32-bit versionCode {version} -> arm64-v8a versionCode {arm64_code}")
+                  target_build = by_vercode[arm64_code]
+              else:
+                  target_build = by_vercode.get(version)
           else:
-              for b in builds:
-                  if str(b.get("versionName")) == version:
-                      target_build = b
-                      break
+              matching = [b for b in builds if str(b.get("versionName")) == version]
+              if matching:
+                  arm64_matches = [
+                      b for b in matching if str(b.get("versionCode", "")).endswith("20")
+                  ]
+                  target_build = arm64_matches[-1] if arm64_matches else matching[-1]
 
           if not target_build:
               lines = "\n".join(
@@ -399,6 +412,8 @@ jobs:
           fix_cmd = "python3 /tmp/fix_fennec_build.py"
           target_build["prebuild"] = f"{orig_prebuild}\n{fix_cmd}" if orig_prebuild else fix_cmd
 
+          meta["Builds"] = [target_build]
+
           with open(meta_path, "w", encoding="utf-8") as f:
               yaml.safe_dump(meta, f, sort_keys=False)
 
@@ -412,14 +427,15 @@ jobs:
               out.write(f"vercode={vercode}\n")
               out.write(f"version_name={ver_name}\n")
 
-          print(f"Resolved vercode={vercode} version_name={ver_name} build_tools={build_tools}")
+          print(f"Resolved arm64-v8a target: vercode={vercode} version_name={ver_name}")
           PY
 
-      - name: Build Fennec
+      - name: Build Fennec (arm64-v8a)
         id: build
         working-directory: fdroiddata
         env:
           FENNEC_VERCODE: ${{ steps.resolve.outputs.vercode }}
+          CMAKE_BUILD_PARALLEL_LEVEL: "4"
           GRADLE_OPTS: '-Dorg.gradle.parallel=true -Dorg.gradle.jvmargs="-Xmx4g -XX:+UseParallelGC"'
         shell: bash
         run: |
@@ -497,7 +513,7 @@ jobs:
           set -Eeuo pipefail
           mkdir -p output
           {
-            printf -- '- Fennec %s (versionCode `%s`) - APK uploaded as workflow artifact, not GitHub Release\n' \
+            printf -- '- Fennec %s arm64-v8a (versionCode `%s`) - APK uploaded as workflow artifact, not GitHub Release\n' \
               "$VERSION_NAME" "$VERCODE"
             printf '  - fdroiddata commit: [`%s`](https://gitlab.com/fdroid/fdroiddata/-/commit/%s)\n' \
               "$FDROIDDATA_HASH" "$FDROIDDATA_HASH"
@@ -506,7 +522,7 @@ jobs:
       - name: Upload Fennec APK artifact
         uses: actions/upload-artifact@v7
         with:
-          name: fennec-apk-${{ steps.resolve.outputs.version_name }}
+          name: fennec-arm64-v8a-apk-${{ steps.resolve.outputs.version_name }}
           path: signed/*.apk
           if-no-files-found: error
           retention-days: 90
