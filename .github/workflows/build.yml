@@ -178,19 +178,22 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake make m4 pkg-config python-is-python3 python3-pip \
-            python3-venv python3-zstandard tcl gyp ninja-build bzip2 libffi-dev \
-            libsqlite3-dev binutils-dev clang lld llvm libssl-dev libxml2-dev \
-            zlib1g-dev nodejs terser zip unzip
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y \
+            autotools-dev build-essential cmake make m4 pkg-config \
+            python-is-python3 python3-pip python3-venv python3-zstandard \
+            tcl gyp ninja-build bzip2 libffi-dev libsqlite3-dev binutils-dev \
+            clang lld llvm libssl-dev libxml2-dev zlib1g-dev nodejs terser zip unzip
 
           python3 -m pip install --break-system-packages --upgrade fdroidserver PyYAML zstandard
 
           LLVM_PREFIX="$(llvm-config --prefix)"
           for ver in 13 14 15 16 17 18 19 20 21 22; do
-            if [[ ! -e "/usr/lib/llvm-${ver}" ]]; then
-              sudo ln -sfn "$LLVM_PREFIX" "/usr/lib/llvm-${ver}"
+            if [[ "/usr/lib/llvm-${ver}" != "$LLVM_PREFIX" ]]; then
+              sudo mkdir -p "/usr/lib/llvm-${ver}/bin"
+              for tool in "$LLVM_PREFIX"/bin/*; do
+                sudo ln -sfn "$tool" "/usr/lib/llvm-${ver}/bin/$(basename "$tool")"
+              done
             fi
           done
 
@@ -206,9 +209,8 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 300
-          git config --global url."https://https.git.savannah.gnu.org/git/".insteadOf "https://git.savannah.gnu.org/git/"
 
-      - name: Install Android SDK packages & CLI shims
+      - name: Install Android SDK packages & sdkmanager shim
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -225,31 +227,6 @@ jobs:
           exec "$REAL_SDKMANAGER" "\${args[@]}"
           EOF
           sudo chmod +x /usr/local/bin/sdkmanager
-
-          REAL_GIT="$(command -v git)"
-          sudo tee /usr/local/bin/git >/dev/null <<EOF
-          #!/usr/bin/env bash
-          has_clone=0
-          has_filter=0
-          for arg in "\$@"; do
-            [[ "\$arg" == "clone" ]] && has_clone=1
-            [[ "\$arg" == --filter=* || "\$arg" == --depth* ]] && has_filter=1
-          done
-          if (( has_clone == 1 && has_filter == 0 )); then
-            new_args=()
-            inserted=0
-            for arg in "\$@"; do
-              new_args+=("\$arg")
-              if [[ "\$arg" == "clone" && \$inserted -eq 0 ]]; then
-                new_args+=("--filter=blob:none")
-                inserted=1
-              fi
-            done
-            exec "$REAL_GIT" "\${new_args[@]}"
-          fi
-          exec "$REAL_GIT" "\$@"
-          EOF
-          sudo chmod +x /usr/local/bin/git
           echo "/usr/local/bin" >> "$GITHUB_PATH"
 
       - name: Cache Gradle
@@ -335,34 +312,25 @@ jobs:
               if "gcc_dir" in data and not os.path.exists(str(data["gcc_dir"])):
                   del data["gcc_dir"]
                   modified = True
-              if "stages" in data and int(data["stages"]) > 1:
-                  data["stages"] = "1" if isinstance(data["stages"], str) else 1
-                  modified = True
-              if "targets" in data and "ARM" in str(data["targets"]):
-                  targets = [t for t in str(data["targets"]).split(";") if t != "ARM"]
-                  data["targets"] = ";".join(targets)
+              if "stages" in data and isinstance(data["stages"], int) and data["stages"] > 1:
+                  data["stages"] = 1
                   modified = True
               if modified:
                   with open(jpath, "w", encoding="utf-8") as f:
                       json.dump(data, f, indent=2)
-                  print(f"[fix_fennec_build] Optimized arm64/stage-1 config in {jpath}")
+                  print(f"[fix_fennec_build] Updated compiler config in {jpath}")
 
           bclang = "../srclib/MozFennec/build/build-clang/build-clang.py"
           if os.path.isfile(bclang):
               with open(bclang, "r", encoding="utf-8") as f:
                   code = f.read()
               old_snippet = 'raise ValueError("%s must point to an existing path" % key)'
-              new_snippet = (
-                  f'f = shutil.which({repr(tool_map)}.get(key, key)) or '
-                  f'shutil.which(os.path.basename(config[key]))\n'
-                  f'        if not f:\n'
-                  f'            {old_snippet}'
-              )
+              new_snippet = f"return __import__('shutil').which({repr(tool_map)}.get(key, key))"
               if old_snippet in code:
                   code = code.replace(old_snippet, new_snippet)
                   with open(bclang, "w", encoding="utf-8") as f:
                       f.write(code)
-                  print(f"[fix_fennec_build] Injected tool fallback into {bclang}")
+                  print(f"[fix_fennec_build] Injected single-line tool fallback into {bclang}")
           EOF
 
           python3 - <<'PY'
@@ -416,6 +384,22 @@ jobs:
 
           with open(meta_path, "w", encoding="utf-8") as f:
               yaml.safe_dump(meta, f, sort_keys=False)
+
+          wasi_path = "srclibs/wasi-sdk.yml"
+          if os.path.isfile(wasi_path):
+              with open(wasi_path, "r", encoding="utf-8") as f:
+                  wasi_meta = yaml.safe_load(f)
+              wasi_meta["Prepare"] = (
+                  "git submodule update --init src/llvm-project src/wasi-libc\n"
+                  "if ! git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 "
+                  "submodule update --init src/config; then\n"
+                  "  mkdir -p src/config\n"
+                  "  cp -f /usr/share/misc/config.guess /usr/share/misc/config.sub src/config/\n"
+                  "fi"
+              )
+              with open(wasi_path, "w", encoding="utf-8") as f:
+                  yaml.safe_dump(wasi_meta, f, sort_keys=False)
+              print("Patched srclibs/wasi-sdk.yml with Savannah fallback")
 
           build_tools = "37.0.0"
           with open("config.yml", "w", encoding="utf-8") as f:
