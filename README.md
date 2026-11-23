@@ -41,6 +41,29 @@ This repository is powered by Dependabot to keep dependencies up-to-date automat
 
 Updates are grouped into a single Pull Request per ecosystem to keep the commit history clean.
 
+## ESP32 AdBlocker Build
+
+This repository also includes a workflow to compile [s60sc/ESP32_AdBlocker](https://github.com/s60sc/ESP32_AdBlocker) firmware for ESP32-S3 boards using GitHub Actions, so you don't need a powerful local machine.
+
+### How to Use
+
+1. Navigate to the **Actions** tab and select the **Build ESP32 AdBlocker** workflow.
+2. Click **Run workflow** and configure:
+   - **Branch/Tag:** Which branch or tag of ESP32_AdBlocker to build (default: `main`)
+   - **Flash Size:** Your ESP32-S3 module's flash size (default: `16M` for N16R8)
+   - **PSRAM:** `opi` for 8MB OPI PSRAM or `qspi` for QPI PSRAM
+   - **Partition Scheme:** `default_8MB` (8M with spiffs) as recommended by the project
+3. Once completed, download the compiled `.bin` files from the **Releases** tab.
+4. Flash to your ESP32-S3 using `esptool.py`:
+   ```bash
+   esptool.py --chip esp32s3 --port COM3 --baud 921600 \
+     --before default_reset --after hard_reset write_flash \
+     -z --flash_mode qio --flash_size 16MB \
+     0x0000 ESP32_AdBlocker.ino.bootloader.bin \
+     0x8000 ESP32_AdBlocker.ino.partitions.bin \
+     0x10000 ESP32_AdBlocker.ino.bin
+   ```
+
 ## Credits & License
 
 This repository only provides the CI/CD automation infrastructure. 

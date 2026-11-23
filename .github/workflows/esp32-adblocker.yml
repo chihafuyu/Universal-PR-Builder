@@ -1,0 +1,226 @@
+name: Build ESP32 AdBlocker
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch or tag of s60sc/ESP32_AdBlocker to build (e.g. main, v1.0)'
+        required: false
+        default: 'main'
+        type: string
+      flash_size:
+        description: 'Flash size of your ESP32-S3 module'
+        required: false
+        default: '16M'
+        type: choice
+        options:
+          - '16M'
+          - '8M'
+          - '4M'
+      psram:
+        description: 'PSRAM type'
+        required: false
+        default: 'opi'
+        type: choice
+        options:
+          - 'opi'
+          - 'qspi'
+      partition_scheme:
+        description: 'Partition scheme (default_8MB = 8M with spiffs, recommended by project)'
+        required: false
+        default: 'default_8MB'
+        type: choice
+        options:
+          - 'default_8MB'
+          - 'default_16MB'
+          - 'huge_app'
+          - 'min_spiffs'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Compile ESP32_AdBlocker for ESP32-S3
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v7
+
+      - name: Clone ESP32_AdBlocker source
+        env:
+          TARGET_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -Eeuo pipefail
+          git clone --depth 1 --branch "$TARGET_BRANCH" \
+            https://github.com/s60sc/ESP32_AdBlocker.git \
+            ESP32_AdBlocker
+          echo "source_hash=$(git -C ESP32_AdBlocker log -1 --format='%h')" >> "$GITHUB_OUTPUT"
+        id: source
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 board core
+        run: |
+          set -Eeuo pipefail
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
+      - name: Show available board options (for debugging)
+        run: |
+          arduino-cli board details --fqbn esp32:esp32:esp32s3 | head -200
+
+      - name: Compile sketch
+        env:
+          FLASH_SIZE: ${{ inputs.flash_size }}
+          PSRAM: ${{ inputs.psram }}
+          PARTITION: ${{ inputs.partition_scheme }}
+        run: |
+          set -Eeuo pipefail
+
+          FQBN="esp32:esp32:esp32s3:FlashSize=${FLASH_SIZE},PSRAM=${PSRAM},PartitionScheme=${PARTITION},FlashMode=qio,CDCOnBoot=cdc,USBMode=hwcdc"
+
+          echo "================================================="
+          echo "Compiling with FQBN: $FQBN"
+          echo "================================================="
+
+          arduino-cli compile \
+            --fqbn "$FQBN" \
+            --output-dir ./build \
+            --warnings default \
+            --verbose \
+            ESP32_AdBlocker
+
+      - name: Prepare release artifacts
+        env:
+          HASH: ${{ steps.source.outputs.source_hash }}
+          BRANCH: ${{ inputs.branch }}
+          FLASH_SIZE: ${{ inputs.flash_size }}
+          PSRAM: ${{ inputs.psram }}
+          PARTITION: ${{ inputs.partition_scheme }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p release
+
+          # Copy all important binary files
+          for ext in bin elf; do
+            for file in build/*."$ext"; do
+              [ -f "$file" ] || continue
+              cp "$file" release/
+            done
+          done
+
+          # List what we have
+          echo "=== Release artifacts ==="
+          ls -lah release/
+
+          # Create a flashing instructions file
+          cat > release/FLASH_INSTRUCTIONS.md << 'EOF'
+          # ESP32_AdBlocker - Flashing Instructions
+
+          ## Using esptool.py (recommended)
+
+          Install esptool:
+          ```
+          pip install esptool
+          ```
+
+          Flash everything (replace /dev/ttyUSB0 with your port, or COMx on Windows):
+          ```
+          esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 921600 \
+            --before default_reset --after hard_reset write_flash \
+            -z --flash_mode qio --flash_size 16MB \
+            0x0000 ESP32_AdBlocker.ino.bootloader.bin \
+            0x8000 ESP32_AdBlocker.ino.partitions.bin \
+            0x10000 ESP32_AdBlocker.ino.bin
+          ```
+
+          ## Using Arduino IDE
+          You can also use Arduino IDE's "Upload" with the .bin file,
+          or use the ESP32 Flash Download Tool on Windows.
+
+          ## Using ESP Web Flasher
+          Visit https://esp.huhn.me/ and upload the .bin files with
+          the correct offsets listed above.
+          EOF
+
+          # Create build info
+          cat > release/BUILD_INFO.txt << BUILDEOF
+          ESP32_AdBlocker Build Information
+          =================================
+          Source: https://github.com/s60sc/ESP32_AdBlocker
+          Branch/Tag: ${BRANCH}
+          Commit: ${HASH}
+          Board: ESP32-S3 Dev Module
+          Flash Size: ${FLASH_SIZE}
+          PSRAM: ${PSRAM}
+          Partition Scheme: ${PARTITION}
+          Flash Mode: QIO
+          USB CDC On Boot: Enabled
+          USB Mode: Hardware CDC and JTAG
+          Built on: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          BUILDEOF
+
+      - name: Generate changelog
+        env:
+          HASH: ${{ steps.source.outputs.source_hash }}
+          BRANCH: ${{ inputs.branch }}
+          FLASH_SIZE: ${{ inputs.flash_size }}
+          PSRAM: ${{ inputs.psram }}
+          PARTITION: ${{ inputs.partition_scheme }}
+        run: |
+          set -Eeuo pipefail
+          COMMIT_URL="https://github.com/s60sc/ESP32_AdBlocker/commit/${HASH}"
+          cat > release-notes.md << NOTES
+          ## ESP32_AdBlocker Firmware Build
+
+          **Source:** [s60sc/ESP32_AdBlocker](https://github.com/s60sc/ESP32_AdBlocker) @ [\`${HASH}\`](${COMMIT_URL})
+          **Branch/Tag:** \`${BRANCH}\`
+
+          ### Board Configuration
+          | Setting | Value |
+          |---------|-------|
+          | Board | ESP32-S3 Dev Module |
+          | Flash Size | ${FLASH_SIZE} |
+          | PSRAM | ${PSRAM} (OPI) |
+          | Partition Scheme | ${PARTITION} |
+          | Flash Mode | QIO |
+          | USB CDC On Boot | Enabled |
+
+          ### Files
+          - \`ESP32_AdBlocker.ino.bin\` — Main firmware binary (flash at 0x10000)
+          - \`ESP32_AdBlocker.ino.bootloader.bin\` — Bootloader (flash at 0x0000)
+          - \`ESP32_AdBlocker.ino.partitions.bin\` — Partition table (flash at 0x8000)
+          - \`FLASH_INSTRUCTIONS.md\` — How to flash to your ESP32-S3
+
+          ### Quick Flash Command (esptool)
+          \`\`\`bash
+          esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 921600 \\
+            --before default_reset --after hard_reset write_flash \\
+            -z --flash_mode qio --flash_size 16MB \\
+            0x0000 ESP32_AdBlocker.ino.bootloader.bin \\
+            0x8000 ESP32_AdBlocker.ino.partitions.bin \\
+            0x10000 ESP32_AdBlocker.ino.bin
+          \`\`\`
+          NOTES
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: esp32-adblocker-${{ inputs.branch }}-${{ github.run_id }}
+          name: 'ESP32_AdBlocker (${{ inputs.branch }}) - ESP32-S3'
+          body_path: release-notes.md
+          files: |
+            release/*.bin
+            release/*.elf
+            release/FLASH_INSTRUCTIONS.md
+            release/BUILD_INFO.txt
+          fail_on_unmatched_files: false
+          prerelease: true
+          make_latest: false
